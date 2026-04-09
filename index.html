@@ -1075,18 +1075,29 @@ async function createTeam() {
 async function confirmTeam() {
   playSound('click');
   if (!S.tid) return;
-  let pid = S.pid;
-  if (!pid) {
-    const { data, error } = await sb.from('players').insert({
-      name: S.name, character_id: S.cid,
-      team_id: S.tid, game_start_date: new Date().toISOString().split('T')[0]
-    }).select().single();
-    if (error) { toast('加入失敗！', true); return; }
-    pid = data.id; S.pid = pid; S.startDate = data.game_start_date;
-  } else {
-    await sb.from('players').update({ team_id: S.tid }).eq('id', pid);
+  const btn = document.getElementById('confirmTeamBtn');
+  btn.disabled = true;
+  btn.textContent = '處理中...';
+  try {
+    let pid = S.pid;
+    if (!pid) {
+      const { data, error } = await sb.from('players').insert({
+        name: S.name, character_id: S.cid,
+        team_id: S.tid, game_start_date: new Date().toISOString().split('T')[0]
+      }).select().single();
+      if (error) throw error;
+      pid = data.id; S.pid = pid; S.startDate = data.game_start_date;
+    } else {
+      const { error } = await sb.from('players').update({ team_id: S.tid }).eq('id', pid);
+      if (error) throw error;
+    }
+    await loadGame();
+  } catch(e) {
+    console.error('confirmTeam error:', e);
+    toast('加入失敗：' + (e.message || JSON.stringify(e)), true);
+    btn.disabled = false;
+    btn.textContent = '▶ 加入此隊伍';
   }
-  await loadGame();
 }
 
 // ===== GAME =====
@@ -1099,7 +1110,11 @@ async function loadGame() {
   S.teams.forEach(t => { t.total_score = scoreMap[t.id]||0; });
 
   const today = new Date().toISOString().split('T')[0];
-  const { data: todaySub } = await sb.from('daily_submissions').select('*').eq('player_id', S.pid).eq('submission_date', today).single().catch(()=>({data:null}));
+  let todaySub = null;
+  try {
+    const { data } = await sb.from('daily_submissions').select('*').eq('player_id', S.pid).eq('submission_date', today).maybeSingle();
+    todaySub = data;
+  } catch(e) { todaySub = null; }
   S.submitted = !!todaySub;
 
   document.getElementById('playerBadge').innerHTML = `<svg width="18" height="24"><use href="#c${S.cid}i"/></svg>&nbsp;${S.name}`;
