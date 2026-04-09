@@ -988,19 +988,30 @@ async function handleLogin() {
   const name = document.getElementById('loginName').value.trim();
   if (!name) { toast('請輸入名字！', true); return; }
   S.name = name;
+
+  // PTGM 觀察者模式 — 直接看主畫面，不屬於任何隊
+  if (name === 'PTGM') {
+    S.pid = 'observer'; S.cid = 1; S.tid = null; S.tname = '';
+    S.isObserver = true;
+    await loadGame();
+    return;
+  }
+
   try {
-    const { data } = await sb.from('players').select('*').eq('name', name).single();
+    const { data, error } = await sb.from('players').select('*').eq('name', name).maybeSingle();
     if (data) {
       S.pid = data.id; S.cid = data.character_id;
       S.tid = data.team_id; S.startDate = data.game_start_date;
       if (data.team_id) {
-        const { data: t } = await sb.from('teams').select('*').eq('id', data.team_id).single();
+        const { data: t } = await sb.from('teams').select('*').eq('id', data.team_id).maybeSingle();
         S.tname = t?.name || '';
         await loadGame();
-      } else { await loadTeamScreen(); }
+      } else {
+        await loadTeamScreen();
+      }
       return;
     }
-  } catch(e) {}
+  } catch(e) { console.error('login check error:', e); }
   buildCharGrid();
   showScreen('charScreen');
 }
@@ -1111,13 +1122,16 @@ async function loadGame() {
 
   const today = new Date().toISOString().split('T')[0];
   let todaySub = null;
-  try {
-    const { data } = await sb.from('daily_submissions').select('*').eq('player_id', S.pid).eq('submission_date', today).maybeSingle();
-    todaySub = data;
-  } catch(e) { todaySub = null; }
+  if (S.pid && S.pid !== 'observer') {
+    try {
+      const { data } = await sb.from('daily_submissions').select('*').eq('player_id', S.pid).eq('submission_date', today).maybeSingle();
+      todaySub = data;
+    } catch(e) { todaySub = null; }
+  }
   S.submitted = !!todaySub;
 
-  document.getElementById('playerBadge').innerHTML = `<svg width="18" height="24"><use href="#c${S.cid}i"/></svg>&nbsp;${S.name}`;
+  const obsLabel = S.isObserver ? ' 👁' : '';
+  document.getElementById('playerBadge').innerHTML = `<svg width="18" height="24"><use href="#c${S.cid}i"/></svg>&nbsp;${S.name}${obsLabel}`;
   renderCountdown();
   renderArena();
   renderHP();
@@ -1189,9 +1203,17 @@ function renderMission() {
   const grid = document.getElementById('missionGrid');
   const btn = document.getElementById('submitBtn');
   const done = document.getElementById('doneBanner');
+  if (S.isObserver) {
+    grid.style.opacity='0.3'; grid.style.pointerEvents='none';
+    btn.style.display='none';
+    done.style.display='block';
+    done.innerHTML='👁 觀察者模式<br><span style="font-size:7px;color:rgba(57,255,20,.5)">僅供觀看，不參與任務</span>';
+    return;
+  }
   if (S.submitted) {
     grid.style.opacity='0.4'; grid.style.pointerEvents='none';
     btn.style.display='none'; done.style.display='block';
+    done.innerHTML='✅ 今日任務完成！<br><span style="font-size:7px;color:rgba(57,255,20,.6)">明天再來繼續戰鬥！</span>';
   } else {
     grid.style.opacity='1'; grid.style.pointerEvents='auto';
     btn.style.display='block'; done.style.display='none';
