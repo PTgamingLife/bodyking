@@ -445,6 +445,23 @@ body {
 }
 .fighter-char.laughing svg { animation:laughBounce .45s ease; }
 
+/* Lock button */
+.lock-btn {
+  display: none;
+  align-items: center; justify-content: center;
+  gap: 6px;
+  background: rgba(0,4,0,.85);
+  border: 2px solid var(--green-dark);
+  padding: 6px 12px;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 7px;
+  cursor: pointer;
+  color: var(--green-bright);
+  touch-action: manipulation;
+  transition: border-color .2s;
+}
+.lock-btn.locked { border-color: var(--red-hp); color: var(--red-hp); }
+
 /* Scrollbar hidden */
 .g-body::-webkit-scrollbar { display:none; }
 .screen::-webkit-scrollbar { display:none; }
@@ -713,7 +730,16 @@ body {
     <div class="g-header">
       <div class="g-badge" id="playerBadge">👾 ?</div>
       <div class="g-title">BODY KING</div>
-      <div class="g-badge countdown-badge" id="countBadge">?? 天</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <button class="lock-btn" id="lockBtn" onclick="toggleLock()">🔒 鎖定</button>
+        <div class="g-badge countdown-badge" id="countBadge">?? 天</div>
+      </div>
+    </div>
+    <div id="lockBanner" style="display:none;background:rgba(140,0,0,0.9);border-bottom:2px solid #ff2d2d;padding:5px 12px;text-align:center;font-family:'Press Start 2P',monospace;font-size:7px;color:#fff;letter-spacing:1px;flex-shrink:0;">
+      🔒 隊伍已鎖定，不接受新成員加入
+    </div>
+    <div id="lockBanner" style="display:none;background:rgba(180,0,0,0.85);border-bottom:2px solid #ff2d2d;padding:5px 12px;text-align:center;font-family:'Press Start 2P',monospace;font-size:8px;color:#fff;letter-spacing:1px;flex-shrink:0;">
+      🔒 隊伍已鎖定，不接受新成員
     </div>
     <div class="g-body">
       <!-- Arena -->
@@ -953,7 +979,8 @@ const sb = createClient(
 const S = {
   name: '', pid: null, cid: null, tid: null, tname: '',
   teams: [], startDate: null,
-  submitted: false, protein: 0, photoFile: null
+  submitted: false, protein: 0, photoFile: null,
+  isObserver: false, rtStarted: false, locked: false
 };
 const CNAMES = ['',...'左衛門,小新,廣志,娜娜子,阿忍,石坂'.split(',')];
 
@@ -981,6 +1008,18 @@ function toast(msg, err=false) {
   setTimeout(() => t.classList.remove('show'), 3000);
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// 每日重置時間 01:00
+function getGameDate() {
+  const now = new Date();
+  // 若現在時間 < 01:00，算作前一天
+  if (now.getHours() < 1) {
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    return yesterday.toISOString().split('T')[0];
+  }
+  return now.toISOString().split('T')[0];
+}
 
 // ===== LOGIN =====
 async function handleLogin() {
@@ -1043,6 +1082,13 @@ async function confirmChar() {
 async function loadTeamScreen() {
   const { data } = await sb.from('teams').select('*, players(id)');
   S.teams = data || [];
+  // 檢查鎖定狀態
+  try {
+    const { data: lockData } = await sb.from('game_settings').select('value').eq('key','locked').single();
+    if (lockData?.value === 'true') {
+      toast('🔒 遊戲已鎖定，隊伍不再接受新成員！', true);
+    }
+  } catch(e) {}
   renderTeams();
   showScreen('teamScreen');
 }
@@ -1086,6 +1132,14 @@ async function createTeam() {
 async function confirmTeam() {
   playSound('click');
   if (!S.tid) return;
+  // 檢查鎖定狀態
+  try {
+    const { data: lockData } = await sb.from('game_settings').select('value').eq('key','locked').single();
+    if (lockData?.value === 'true') {
+      toast('🔒 隊伍已鎖定，無法加入新成員！', true);
+      return;
+    }
+  } catch(e) {}
   const btn = document.getElementById('confirmTeamBtn');
   btn.disabled = true;
   btn.textContent = '處理中...';
@@ -1113,32 +1167,51 @@ async function confirmTeam() {
 
 // ===== GAME =====
 async function loadGame() {
-  const { data: teams } = await sb.from('teams').select('*, players(id,name,character_id,team_id)');
-  S.teams = teams || [];
-  const { data: subs } = await sb.from('daily_submissions').select('*');
-  const scoreMap = {};
-  (subs||[]).forEach(s => { scoreMap[s.team_id] = (scoreMap[s.team_id]||0) + s.protein_count; });
-  S.teams.forEach(t => { t.total_score = scoreMap[t.id]||0; });
+  try {
+    const { data: teams } = await sb.from('teams').select('*, players(id,name,character_id,team_id)');
+    S.teams = teams || [];
+    const { data: subs } = await sb.from('daily_submissions').select('*');
+    const scoreMap = {};
+    (subs||[]).forEach(s => { scoreMap[s.team_id] = (scoreMap[s.team_id]||0) + s.protein_count; });
+    S.teams.forEach(t => { t.total_score = scoreMap[t.id]||0; });
 
-  const today = new Date().toISOString().split('T')[0];
-  let todaySub = null;
-  if (S.pid && S.pid !== 'observer') {
+    // 每日提交狀態
+    const today = new Date().toISOString().split('T')[0];
+    let todaySub = null;
+    if (S.pid && S.pid !== 'observer') {
+      try {
+        const { data } = await sb.from('daily_submissions').select('*')
+          .eq('player_id', S.pid).eq('submission_date', today).maybeSingle();
+        todaySub = data;
+      } catch(e) { todaySub = null; }
+    }
+    S.submitted = !!todaySub;
+
+    // game_start_date fallback
+    if (!S.startDate) S.startDate = getGameDate();
+
+    const obsLabel = S.isObserver ? ' 👁' : '';
+    document.getElementById('playerBadge').innerHTML =
+      `<svg width="18" height="24"><use href="#c${S.cid}i"/></svg>&nbsp;${S.name}${obsLabel}`;
+
+    // 載入鎖定狀態
     try {
-      const { data } = await sb.from('daily_submissions').select('*').eq('player_id', S.pid).eq('submission_date', today).maybeSingle();
-      todaySub = data;
-    } catch(e) { todaySub = null; }
-  }
-  S.submitted = !!todaySub;
+      const { data: lockData } = await sb.from('game_settings').select('value').eq('key','locked').single();
+      S.locked = lockData?.value === 'true';
+    } catch(e) { S.locked = false; }
 
-  const obsLabel = S.isObserver ? ' 👁' : '';
-  document.getElementById('playerBadge').innerHTML = `<svg width="18" height="24"><use href="#c${S.cid}i"/></svg>&nbsp;${S.name}${obsLabel}`;
-  renderCountdown();
-  renderArena();
-  renderHP();
-  renderMission();
-  showScreen('gameScreen');
-  startBGM();
-  subscribeRT();
+    renderCountdown();
+    renderArena();
+    renderHP();
+    renderMission();
+    renderLockState();
+    showScreen('gameScreen');
+    startBGM();
+    if (!S.rtStarted) { subscribeRT(); S.rtStarted = true; }
+  } catch(e) {
+    console.error('loadGame error:', e);
+    toast('載入失敗：' + (e.message || e), true);
+  }
 }
 
 function renderCountdown() {
@@ -1260,7 +1333,7 @@ async function submitDaily() {
     const { error: upErr } = await sb.storage.from('breakfast-photos').upload(path, S.photoFile, { upsert: true });
     if (upErr) throw upErr;
     const { data: urlD } = sb.storage.from('breakfast-photos').getPublicUrl(path);
-    const today = new Date().toISOString().split('T')[0];
+    const today = getGameDate();
     const { error: subErr } = await sb.from('daily_submissions').insert({
       player_id: S.pid, player_name: S.name,
       team_id: S.tid, submission_date: today,
@@ -1274,7 +1347,14 @@ async function submitDaily() {
     await triggerLaugh(S.protein);
     playSound('levelup');
     showLevelUp();
-    await loadGame();
+    // Reload scores without re-subscribing RT
+    const { data: newTeams } = await sb.from('teams').select('*, players(id,name,character_id,team_id)');
+    if (newTeams) S.teams = newTeams;
+    const { data: newSubs } = await sb.from('daily_submissions').select('*');
+    const sm2 = {};
+    (newSubs||[]).forEach(s => { sm2[s.team_id]=(sm2[s.team_id]||0)+s.protein_count; });
+    S.teams.forEach(t => { t.total_score = sm2[t.id]||0; });
+    renderHP(); renderArena(); renderMission();
   } catch(e) {
     console.error(e);
     toast('送出失敗！' + (e.message||''), true);
@@ -1304,12 +1384,43 @@ function showLevelUp() {
 }
 
 // ===== REALTIME =====
+// ===== LOCK =====
+function renderLockState() {
+  const banner = document.getElementById('lockBanner');
+  const btn = document.getElementById('lockBtn');
+  if (!banner || !btn) return;
+  banner.style.display = S.locked ? 'block' : 'none';
+  if (S.isObserver) {
+    btn.style.display = 'flex';
+    btn.className = 'lock-btn' + (S.locked ? ' locked' : '');
+    btn.innerHTML = S.locked ? '🔓 解鎖隊伍' : '🔒 鎖定隊伍';
+  }
+}
+
+async function toggleLock() {
+  const newVal = !S.locked;
+  try {
+    await sb.from('game_settings').upsert({ key: 'locked', value: String(newVal), updated_at: new Date().toISOString() });
+    S.locked = newVal;
+    renderLockState();
+    toast(newVal ? '🔒 隊伍已鎖定！新成員無法加入' : '🔓 隊伍已解鎖！');
+  } catch(e) {
+    toast('操作失敗：' + e.message, true);
+  }
+}
+
 function subscribeRT() {
+  try { sb.removeChannel(sb.channel('bk-updates')); } catch(e) {}
   sb.channel('bk-updates')
     .on('postgres_changes',{event:'*',schema:'public',table:'teams'}, async () => {
       const {data} = await sb.from('teams').select('*, players(id,name,character_id,team_id)');
       if (data) S.teams = data;
       renderHP(); renderArena();
+    })
+    .on('postgres_changes',{event:'*',schema:'public',table:'game_settings'}, async () => {
+      const { data } = await sb.from('game_settings').select('value').eq('key','locked').single();
+      S.locked = data?.value === 'true';
+      renderLockState();
     })
     .on('postgres_changes',{event:'INSERT',schema:'public',table:'daily_submissions'}, async () => {
       const {data:subs} = await sb.from('daily_submissions').select('*');
